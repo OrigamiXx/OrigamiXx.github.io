@@ -1,0 +1,587 @@
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="4.3.4">Jekyll</generator><link href="http://localhost:4000/feed.xml" rel="self" type="application/atom+xml" /><link href="http://localhost:4000/" rel="alternate" type="text/html" /><updated>2024-11-20T14:51:00+08:00</updated><id>http://localhost:4000/feed.xml</id><title type="html">desong的博客</title><subtitle>Write an awesome description for your new site here. You can edit this line in _config.yml. It will appear in your document head meta (for Google search results) and in your feed.xml site description.</subtitle><author><name>desong</name></author><entry><title type="html">Design and implementation of a distributed publish Subscribe system (part 3)</title><link href="http://localhost:4000/2024/10/01/Design-and-implementation-of-a-distributed-publish-subscribe-system-(Part-3).html" rel="alternate" type="text/html" title="Design and implementation of a distributed publish Subscribe system (part 3)" /><published>2024-10-01T00:00:00+08:00</published><updated>2024-10-01T00:00:00+08:00</updated><id>http://localhost:4000/2024/10/01/Design%20and%20implementation%20of%20a%20distributed%20publish-subscribe%20system%20(Part%203)</id><content type="html" xml:base="http://localhost:4000/2024/10/01/Design-and-implementation-of-a-distributed-publish-subscribe-system-(Part-3).html"><![CDATA[<h2 id="system-architecture-overview">System Architecture Overview</h2>
+
+<p>In the first two articles, we introduced the basic concepts of the message subscription system and its implementation under a single node. As the system scale expands and performance requirements increase, the single-node architecture obviously cannot meet the requirements of high concurrency and high availability. This article will explore how to implement publishers, subscribers, and brokers in a distributed environment and solve the challenges faced in the distributed architecture.</p>
+
+<ol>
+  <li>The publisher publishes the message to the specified topic.</li>
+  <li>After the broker receives the message, it finds the corresponding subscriber based on the topic.</li>
+  <li>The broker pushes the message to the subscribers to whom it is connected and subscribes to the topic.</li>
+  <li>The broker synchronizes the message to other brokers.</li>
+  <li>Other brokers push the message to the subscribers to whom they are connected and subscribe to the topic.</li>
+</ol>
+
+<h2 id="implementation-details">Implementation details</h2>
+
+<h3 id="1-receive-connections-from-other-brokers">1. Receive connections from other brokers</h3>
+<p>Use type to distinguish whether it is a connection from other brokers, a connection from a publisher, or a connection from a subscriber. If it is a connection from other brokers, use BrokerHandler to handle it. If it is a connection from a client, use ClientHandler to handle it.</p>
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code>        <span class="c1">// Parse command line arguments</span>
+        <span class="k">for</span> <span class="o">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">1</span><span class="o">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">args</span><span class="o">.</span><span class="na">length</span><span class="o">;</span> <span class="n">i</span><span class="o">++)</span> <span class="o">{</span>
+            <span class="k">if</span> <span class="o">(</span><span class="s">"-b"</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">args</span><span class="o">[</span><span class="n">i</span><span class="o">]))</span> <span class="o">{</span>
+
+                <span class="nc">StringBuilder</span> <span class="n">brokers</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">StringBuilder</span><span class="o">();</span>
+                <span class="k">for</span> <span class="o">(</span><span class="kt">int</span> <span class="n">j</span> <span class="o">=</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="o">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">args</span><span class="o">.</span><span class="na">length</span><span class="o">;</span> <span class="n">j</span><span class="o">++)</span> <span class="o">{</span>
+                    <span class="n">brokers</span><span class="o">.</span><span class="na">append</span><span class="o">(</span><span class="n">args</span><span class="o">[</span><span class="n">j</span><span class="o">]).</span><span class="na">append</span><span class="o">(</span><span class="s">" "</span><span class="o">);</span>
+                <span class="o">}</span>
+                <span class="n">brokersArg</span> <span class="o">=</span> <span class="n">brokers</span><span class="o">.</span><span class="na">toString</span><span class="o">().</span><span class="na">trim</span><span class="o">();</span>
+                <span class="k">break</span><span class="o">;</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+
+        <span class="k">if</span> <span class="o">(!</span><span class="n">brokersArg</span><span class="o">.</span><span class="na">isEmpty</span><span class="o">())</span> <span class="o">{</span>
+
+            <span class="n">connectToOtherBrokers</span><span class="o">(</span><span class="n">brokersArg</span><span class="o">);</span>
+            <span class="k">new</span> <span class="nf">Thread</span><span class="o">(</span><span class="k">new</span> <span class="nc">BrokerConnectionListener</span><span class="o">(</span><span class="n">args</span><span class="o">[</span><span class="mi">2</span><span class="o">])).</span><span class="na">start</span><span class="o">();</span>
+        <span class="o">}</span>
+
+
+        <span class="c1">// Accept connections from clients and other Brokers</span>
+        <span class="k">while</span> <span class="o">(</span><span class="kc">true</span><span class="o">)</span> <span class="o">{</span>
+            <span class="nc">Socket</span> <span class="n">socket</span> <span class="o">=</span> <span class="n">serverSocket</span><span class="o">.</span><span class="na">accept</span><span class="o">();</span>
+            <span class="k">new</span> <span class="nf">Thread</span><span class="o">(()</span> <span class="o">-&gt;</span> <span class="o">{</span>
+                <span class="k">try</span> <span class="o">{</span>
+                    <span class="nc">BufferedReader</span> <span class="n">in</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">BufferedReader</span><span class="o">(</span><span class="k">new</span> <span class="nc">InputStreamReader</span><span class="o">(</span><span class="n">socket</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">()));</span>
+                    <span class="nc">PrintWriter</span> <span class="n">out</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">PrintWriter</span><span class="o">(</span><span class="n">socket</span><span class="o">.</span><span class="na">getOutputStream</span><span class="o">(),</span> <span class="kc">true</span><span class="o">);</span>
+
+
+                    <span class="nc">String</span> <span class="n">type</span> <span class="o">=</span> <span class="n">in</span><span class="o">.</span><span class="na">readLine</span><span class="o">();</span>
+                    <span class="k">if</span> <span class="o">(</span><span class="s">"BROKER"</span><span class="o">.</span><span class="na">equalsIgnoreCase</span><span class="o">(</span><span class="n">type</span><span class="o">))</span> <span class="o">{</span>
+
+                        <span class="n">brokerConnections</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">socket</span><span class="o">);</span>
+                        <span class="k">new</span> <span class="nf">Thread</span><span class="o">(</span><span class="k">new</span> <span class="nc">BrokerHandler</span><span class="o">(</span><span class="n">socket</span><span class="o">)).</span><span class="na">start</span><span class="o">();</span>
+                        <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Accepted connection from another broker."</span><span class="o">);</span>
+                    <span class="o">}</span> <span class="k">else</span> <span class="k">if</span> <span class="o">(</span><span class="s">"SUB"</span><span class="o">.</span><span class="na">equalsIgnoreCase</span><span class="o">(</span><span class="n">type</span><span class="o">)</span> <span class="o">||</span> <span class="s">"PUB"</span><span class="o">.</span><span class="na">equalsIgnoreCase</span><span class="o">(</span><span class="n">type</span><span class="o">))</span> <span class="o">{</span>
+
+<span class="c1">//                        clientConnections.add(socket);</span>
+                        <span class="k">new</span> <span class="nf">Thread</span><span class="o">(</span><span class="k">new</span> <span class="nc">ClientHandler</span><span class="o">(</span><span class="n">socket</span><span class="o">)).</span><span class="na">start</span><span class="o">();</span>
+                        <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Accepted connection from a client."</span><span class="o">);</span>
+
+
+                        <span class="k">if</span> <span class="o">(</span><span class="s">"SUB"</span><span class="o">.</span><span class="na">equalsIgnoreCase</span><span class="o">(</span><span class="n">type</span><span class="o">))</span> <span class="o">{</span>
+                            <span class="n">subscriberCount</span><span class="o">++;</span>
+                            <span class="k">if</span> <span class="o">(</span><span class="n">subscriberCount</span> <span class="o">&gt;</span> <span class="no">MAX_SUB</span><span class="o">)</span> <span class="o">{</span>
+                                <span class="c1">//socket.close();</span>
+                                <span class="n">sendResponse</span><span class="o">(</span><span class="n">socket</span><span class="o">,</span> <span class="s">"close"</span><span class="o">);</span>
+                                <span class="n">subscriberCount</span><span class="o">--;</span>
+                            <span class="o">}</span>
+
+                        <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+                            <span class="n">publisherCount</span><span class="o">++;</span>
+                            <span class="k">if</span> <span class="o">(</span><span class="n">publisherCount</span> <span class="o">&gt;</span> <span class="no">MAX_PUB</span><span class="o">)</span> <span class="o">{</span>
+                                <span class="c1">//socket.close();</span>
+                                <span class="n">sendResponse</span><span class="o">(</span><span class="n">socket</span><span class="o">,</span> <span class="s">"close"</span><span class="o">);</span>
+                                <span class="n">publisherCount</span><span class="o">--;</span>
+                            <span class="o">}</span>
+
+                        <span class="o">}</span>
+
+                    <span class="o">}</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="nc">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="c1">//e.printStackTrace();</span>
+                    <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">());</span>
+                <span class="o">}</span>
+            <span class="o">}).</span><span class="na">start</span><span class="o">();</span>
+        <span class="o">}</span>
+
+</code></pre></div></div>
+<h3 id="2-connect-to-other-brokers">2. Connect to other brokers</h3>
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code> 
+      <span class="kd">private</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">connectToOtherBrokers</span><span class="o">(</span><span class="nc">String</span> <span class="n">brokersArg</span><span class="o">)</span> <span class="o">{</span>
+        <span class="nc">String</span><span class="o">[]</span> <span class="n">brokers</span> <span class="o">=</span> <span class="n">brokersArg</span><span class="o">.</span><span class="na">split</span><span class="o">(</span><span class="s">" "</span><span class="o">);</span>
+        <span class="k">for</span> <span class="o">(</span><span class="nc">String</span> <span class="n">broker</span> <span class="o">:</span> <span class="n">brokers</span><span class="o">)</span> <span class="o">{</span>
+            <span class="nc">String</span><span class="o">[]</span> <span class="n">brokerInfo</span> <span class="o">=</span> <span class="n">broker</span><span class="o">.</span><span class="na">split</span><span class="o">(</span><span class="s">":"</span><span class="o">);</span>
+            <span class="nc">String</span> <span class="n">brokerIp</span> <span class="o">=</span> <span class="n">brokerInfo</span><span class="o">[</span><span class="mi">0</span><span class="o">];</span>
+            <span class="kt">int</span> <span class="n">brokerPort</span> <span class="o">=</span> <span class="nc">Integer</span><span class="o">.</span><span class="na">parseInt</span><span class="o">(</span><span class="n">brokerInfo</span><span class="o">[</span><span class="mi">1</span><span class="o">]);</span>
+            <span class="k">try</span> <span class="o">{</span>
+                <span class="nc">Socket</span> <span class="n">brokerSocket</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">Socket</span><span class="o">(</span><span class="n">brokerIp</span><span class="o">,</span> <span class="n">brokerPort</span><span class="o">);</span>
+                <span class="nc">PrintWriter</span> <span class="n">out</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">PrintWriter</span><span class="o">(</span><span class="n">brokerSocket</span><span class="o">.</span><span class="na">getOutputStream</span><span class="o">(),</span> <span class="kc">true</span><span class="o">);</span>
+                <span class="n">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"BROKER"</span><span class="o">);</span>
+                <span class="n">brokerConnections</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">brokerSocket</span><span class="o">);</span>
+                <span class="k">new</span> <span class="nf">Thread</span><span class="o">(</span><span class="k">new</span> <span class="nc">BrokerHandler</span><span class="o">(</span><span class="n">brokerSocket</span><span class="o">)).</span><span class="na">start</span><span class="o">();</span>
+                <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Connected to broker: "</span> <span class="o">+</span> <span class="n">brokerIp</span> <span class="o">+</span> <span class="s">":"</span> <span class="o">+</span> <span class="n">brokerPort</span><span class="o">);</span>
+            <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="nc">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Failed to connect to broker: "</span> <span class="o">+</span> <span class="n">brokerIp</span> <span class="o">+</span> <span class="s">":"</span> <span class="o">+</span> <span class="n">brokerPort</span><span class="o">);</span>
+                <span class="k">if</span> <span class="o">(!</span><span class="n">failedBrokers</span><span class="o">.</span><span class="na">contains</span><span class="o">(</span><span class="n">broker</span><span class="o">))</span> <span class="o">{</span>
+                    <span class="n">failedBrokers</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">broker</span><span class="o">);</span>
+                <span class="o">}</span>
+
+            <span class="o">}</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+</code></pre></div></div>
+<h3 id="3-broker-connection-listener">3. Broker connection listener</h3>
+<p>During the broker operation, new proxies may be added. Create a broker listener to monitor.</p>
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">// Listener class: Periodically retry the Broker that failed to connect</span>
+    <span class="kd">private</span> <span class="kd">static</span> <span class="kd">class</span> <span class="nc">BrokerConnectionListener</span> <span class="kd">implements</span> <span class="nc">Runnable</span> <span class="o">{</span>
+        <span class="kd">private</span> <span class="kd">final</span> <span class="nc">String</span> <span class="n">brokersArg</span><span class="o">;</span>
+        <span class="kd">private</span> <span class="kd">static</span> <span class="kd">final</span> <span class="kt">int</span> <span class="no">RETRY_INTERVAL</span> <span class="o">=</span> <span class="mi">5000</span><span class="o">;</span>
+
+        <span class="kd">public</span> <span class="nf">BrokerConnectionListener</span><span class="o">(</span><span class="nc">String</span> <span class="n">brokersArg</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">this</span><span class="o">.</span><span class="na">brokersArg</span> <span class="o">=</span> <span class="n">brokersArg</span><span class="o">;</span>
+        <span class="o">}</span>
+
+        <span class="nd">@Override</span>
+        <span class="kd">public</span> <span class="kt">void</span> <span class="nf">run</span><span class="o">()</span> <span class="o">{</span>
+            <span class="k">while</span> <span class="o">(</span><span class="kc">true</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">try</span> <span class="o">{</span>
+                    <span class="nc">Thread</span><span class="o">.</span><span class="na">sleep</span><span class="o">(</span><span class="no">RETRY_INTERVAL</span><span class="o">);</span>
+                    <span class="n">retryFailedConnections</span><span class="o">();</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="nc">InterruptedException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+                <span class="o">}</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+
+        <span class="c1">// Retry the Broker that failed to connect</span>
+        <span class="kd">private</span> <span class="kt">void</span> <span class="nf">retryFailedConnections</span><span class="o">()</span> <span class="o">{</span>
+            <span class="nc">Iterator</span><span class="o">&lt;</span><span class="nc">String</span><span class="o">&gt;</span> <span class="n">iterator</span> <span class="o">=</span> <span class="n">failedBrokers</span><span class="o">.</span><span class="na">iterator</span><span class="o">();</span>
+            <span class="k">while</span> <span class="o">(</span><span class="n">iterator</span><span class="o">.</span><span class="na">hasNext</span><span class="o">())</span> <span class="o">{</span>
+                <span class="nc">String</span> <span class="n">broker</span> <span class="o">=</span> <span class="n">iterator</span><span class="o">.</span><span class="na">next</span><span class="o">();</span>
+                <span class="nc">String</span><span class="o">[]</span> <span class="n">brokerInfo</span> <span class="o">=</span> <span class="n">broker</span><span class="o">.</span><span class="na">split</span><span class="o">(</span><span class="s">":"</span><span class="o">);</span>
+                <span class="nc">String</span> <span class="n">brokerIp</span> <span class="o">=</span> <span class="n">brokerInfo</span><span class="o">[</span><span class="mi">0</span><span class="o">];</span>
+                <span class="kt">int</span> <span class="n">brokerPort</span> <span class="o">=</span> <span class="nc">Integer</span><span class="o">.</span><span class="na">parseInt</span><span class="o">(</span><span class="n">brokerInfo</span><span class="o">[</span><span class="mi">1</span><span class="o">]);</span>
+                <span class="k">try</span> <span class="o">{</span>
+                    <span class="nc">Socket</span> <span class="n">brokerSocket</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">Socket</span><span class="o">(</span><span class="n">brokerIp</span><span class="o">,</span> <span class="n">brokerPort</span><span class="o">);</span>
+                    <span class="n">brokerConnections</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">brokerSocket</span><span class="o">);</span>
+                    <span class="k">new</span> <span class="nf">Thread</span><span class="o">(</span><span class="k">new</span> <span class="nc">BrokerHandler</span><span class="o">(</span><span class="n">brokerSocket</span><span class="o">)).</span><span class="na">start</span><span class="o">();</span>
+                    <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Reconnected to broker: "</span> <span class="o">+</span> <span class="n">brokerIp</span> <span class="o">+</span> <span class="s">":"</span> <span class="o">+</span> <span class="n">brokerPort</span><span class="o">);</span>
+                    <span class="n">iterator</span><span class="o">.</span><span class="na">remove</span><span class="o">();</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="nc">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Retrying failed broker: "</span> <span class="o">+</span> <span class="n">brokerIp</span> <span class="o">+</span> <span class="s">":"</span> <span class="o">+</span> <span class="n">brokerPort</span><span class="o">);</span>
+                <span class="o">}</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+</code></pre></div></div>
+
+<h3 id="4-synchronize-messages-to-other-brokers">4. Synchronize messages to other brokers</h3>
+<p>When processing publisher-subscriber messages of this broker node, it is necessary to synchronize them to other nodes.</p>
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code>
+ <span class="c1">//Broadcast messages to other brokers</span>
+    <span class="kd">private</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">broadcastToBrokers</span><span class="o">(</span><span class="nc">String</span> <span class="n">message</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">for</span> <span class="o">(</span><span class="nc">Socket</span> <span class="n">brokerSocket</span> <span class="o">:</span> <span class="n">brokerConnections</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">try</span> <span class="o">{</span>
+                <span class="nc">PrintWriter</span> <span class="n">out</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">PrintWriter</span><span class="o">(</span><span class="n">brokerSocket</span><span class="o">.</span><span class="na">getOutputStream</span><span class="o">(),</span> <span class="kc">true</span><span class="o">);</span>
+                <span class="n">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">message</span><span class="o">);</span>
+            <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="nc">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Failed to broadcast message to broker: "</span> <span class="o">+</span> <span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">());</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+</code></pre></div></div>
+
+<h3 id="5-receive-and-process-messages-from-other-brokers">5. Receive and process messages from other brokers</h3>
+<p>Parse messages from other brokers and process them accordingly, such as synchronously creating topics and synchronously subscribing.</p>
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">// Used to process messages from other Brokers</span>
+    <span class="kd">private</span> <span class="kd">static</span> <span class="kd">class</span> <span class="nc">BrokerHandler</span> <span class="kd">implements</span> <span class="nc">Runnable</span> <span class="o">{</span>
+        <span class="kd">private</span> <span class="kd">final</span> <span class="nc">Socket</span> <span class="n">brokerSocket</span><span class="o">;</span>
+
+        <span class="kd">public</span> <span class="nf">BrokerHandler</span><span class="o">(</span><span class="nc">Socket</span> <span class="n">brokerSocket</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">this</span><span class="o">.</span><span class="na">brokerSocket</span> <span class="o">=</span> <span class="n">brokerSocket</span><span class="o">;</span>
+        <span class="o">}</span>
+
+        <span class="nd">@Override</span>
+        <span class="kd">public</span> <span class="kt">void</span> <span class="nf">run</span><span class="o">()</span> <span class="o">{</span>
+            <span class="k">try</span> <span class="o">(</span><span class="nc">BufferedReader</span> <span class="n">in</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">BufferedReader</span><span class="o">(</span><span class="k">new</span> <span class="nc">InputStreamReader</span><span class="o">(</span><span class="n">brokerSocket</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">())))</span> <span class="o">{</span>
+                <span class="nc">String</span> <span class="n">message</span><span class="o">;</span>
+                <span class="k">while</span> <span class="o">((</span><span class="n">message</span> <span class="o">=</span> <span class="n">in</span><span class="o">.</span><span class="na">readLine</span><span class="o">())</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="n">handleBrokerMessage</span><span class="o">(</span><span class="n">message</span><span class="o">);</span>
+                <span class="o">}</span>
+            <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="nc">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                <span class="c1">//e.printStackTrace();</span>
+                <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">());</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+
+
+        <span class="c1">// Process messages from other Brokers</span>
+        <span class="kd">private</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">handleBrokerMessage</span><span class="o">(</span><span class="nc">String</span> <span class="n">message</span><span class="o">)</span> <span class="o">{</span>
+            <span class="nc">String</span><span class="o">[]</span> <span class="n">parts</span> <span class="o">=</span> <span class="n">message</span><span class="o">.</span><span class="na">split</span><span class="o">(</span><span class="s">" "</span><span class="o">);</span>
+            <span class="nc">String</span> <span class="n">command</span> <span class="o">=</span> <span class="n">parts</span><span class="o">[</span><span class="mi">0</span><span class="o">];</span>
+
+
+            <span class="k">switch</span> <span class="o">(</span><span class="n">command</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">case</span> <span class="s">"CREATE"</span><span class="o">:</span>
+                    <span class="n">createTopic</span><span class="o">(</span><span class="n">parts</span><span class="o">);</span>
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="k">case</span> <span class="s">"PUBLISH"</span><span class="o">:</span>
+                    <span class="n">publishMessage</span><span class="o">(</span><span class="n">parts</span><span class="o">);</span>
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="k">case</span> <span class="s">"SUBSCRIBE"</span><span class="o">:</span>
+                    <span class="n">subscribe</span><span class="o">(</span><span class="n">parts</span><span class="o">);</span>
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="k">case</span> <span class="s">"DELETE"</span><span class="o">:</span>
+                    <span class="n">deleteTopic</span><span class="o">(</span><span class="n">parts</span><span class="o">);</span>
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="k">case</span> <span class="s">"UNSUBSCRIBE"</span><span class="o">:</span>
+                    <span class="n">unsubscribe</span><span class="o">(</span><span class="n">parts</span><span class="o">);</span>
+                <span class="k">default</span><span class="o">:</span>
+                    <span class="k">break</span><span class="o">;</span>
+            <span class="o">}</span>
+
+
+        <span class="o">}</span>
+
+
+        <span class="o">......</span>
+    <span class="o">}</span>
+
+
+</code></pre></div></div>
+
+<h2 id="test">Test</h2>
+<p>Start two brokers broker1 and broker2 in sequence. Broker1 connects to publisher and subscriber1; broker2 connects to subscriber2; subscriber1 and subscriber2 subscribe to the topic created by publisher.</p>
+
+<p>Publisher creates a topic and sends a message
+<img src="/assets/images/ts1.jpg" alt="Figure1" /></p>
+
+<p>Subscribers on two different nodes receive the message
+<img src="/assets/images/ts2.jpg" alt="Figure2" />
+<img src="/assets/images/ts3.jpg" alt="Figure3" /></p>]]></content><author><name>desong</name></author><summary type="html"><![CDATA[System Architecture Overview]]></summary></entry><entry><title type="html">Design and implementation of a distributed publish Subscribe system (part 1)</title><link href="http://localhost:4000/2024/10/01/Design-and-implementation-of-a-distributed-publish-subscribe-system-(Part-1).html" rel="alternate" type="text/html" title="Design and implementation of a distributed publish Subscribe system (part 1)" /><published>2024-10-01T00:00:00+08:00</published><updated>2024-10-01T00:00:00+08:00</updated><id>http://localhost:4000/2024/10/01/Design%20and%20implementation%20of%20a%20distributed%20publish-subscribe%20system%20(Part%201)</id><content type="html" xml:base="http://localhost:4000/2024/10/01/Design-and-implementation-of-a-distributed-publish-subscribe-system-(Part-1).html"><![CDATA[<h2 id="introduction">Introduction</h2>
+
+<p>A distributed message subscription system is an architecture for processing and distributing messages, aiming to achieve efficient and reliable information delivery. The system consists of three main components: broker, publisher, and subscriber.</p>
+
+<h2 id="main-components">Main components</h2>
+
+<h3 id="1-broker">1. Broker</h3>
+
+<p>The broker is the core of the distributed message subscription system, responsible for managing topics, subscriptions, and message distribution. Broker nodes are interconnected to form a network, managing topic creation, topic lists, subscriber lists, and message routing to ensure that messages can be effectively delivered between different topics and subscribers.</p>
+
+<h3 id="2-publisher">2. Publisher</h3>
+
+<p>The publisher is a client system responsible for creating topics and publishing messages to topics. The publisher can be any application or service that can send messages. Specific functions of the publisher:</p>
+
+<ol>
+  <li>
+    <p>Create a new topic: Generate a unique topic ID (such as UUID) and assign a name (not necessarily unique, because multiple publishers may have topics with the same name).</p>
+  </li>
+  <li>
+    <p>Publish a message to an existing Topic: Send a message through the Broker of the Topic, using a unique topic ID. The message should be sent to all topic subscribers. Each message will be limited to a maximum of 100 characters. There is no need to retain messages in any broker.</p>
+  </li>
+  <li>
+    <p>Show subscriber count: Display the total number of subscribers for each topic associated with this.</p>
+  </li>
+  <li>
+    <p>Delete topic: Delete the topic from the system and automatically unsubscribe all currently subscribing scribes. A notification message should be sent to each subscriber.</p>
+  </li>
+</ol>
+
+<h3 id="3-subscribers">3. Subscribers</h3>
+
+<p>Subscribers are clients who express interest by subscribing to specific topics through brokers. They receive real-time messages about these topics from broker nodes. Subscriber specific functions:</p>
+
+<ol>
+  <li>
+    <p>List all available topics: Retrieve a list of all available topics in the broker network, including topic ID, topic name, and publisher name.</p>
+  </li>
+  <li>
+    <p>Subscribe to a topic: Subscribe to a topic using its unique ID. The subscriber will receive all future messages about this topic.</p>
+  </li>
+  <li>
+    <p>Show current subscriptions: List active subscriptions, including topic ID, topic name, and publisher name.</p>
+  </li>
+  <li>
+    <p>Unsubscribe from a topic: Stop receiving messages from a topic. The broker sends a notification to confirm the unsubscription message</p>
+  </li>
+</ol>
+
+<p><img src="/assets/images/broker.jpg" alt="Figure1" /></p>
+
+<h2 id="design-ideas">Design ideas</h2>
+
+<ol>
+  <li>Whether it is the communication between nodes and publishers, subscribers, or the communication between nodes, it is based on sockets.</li>
+</ol>
+
+<p><img src="/assets/images/socket.jpg" alt="Figure2" /></p>
+
+<ol>
+  <li>
+    <p>Create a thread to realize the communication between message subscribers and publishers. Create a topic class to store subscribers to ensure that when the publisher publishes a message to the topic, it can notify the subscribers under the topic.</p>
+  </li>
+  <li>
+    <p>Create another thread to realize the interconnection of multiple nodes. When a node receives an instruction, ensure that other nodes also receive the notification to ensure the synchronization of the message.</p>
+  </li>
+</ol>
+
+<p>Based on the above ideas, we gradually implement this system. The specific implementation will be introduced in the next article.</p>]]></content><author><name>desong</name></author><summary type="html"><![CDATA[Introduction]]></summary></entry><entry><title type="html">Design and implementation of a distributed publish Subscribe system (part 2)</title><link href="http://localhost:4000/2024/10/01/Design-and-implementation-of-a-distributed-publish-subscribe-system-(Part-2).html" rel="alternate" type="text/html" title="Design and implementation of a distributed publish Subscribe system (part 2)" /><published>2024-10-01T00:00:00+08:00</published><updated>2024-10-01T00:00:00+08:00</updated><id>http://localhost:4000/2024/10/01/Design%20and%20implementation%20of%20a%20distributed%20publish-subscribe%20system%20(Part%202)</id><content type="html" xml:base="http://localhost:4000/2024/10/01/Design-and-implementation-of-a-distributed-publish-subscribe-system-(Part-2).html"><![CDATA[<h2 id="system-architecture-overview">System Architecture Overview</h2>
+
+<p>In a single-node environment, the broker is responsible for coordinating the interaction between publishers and subscribers, storing messages and pushing messages to subscribed clients. The overall process is as follows:</p>
+
+<ol>
+  <li>
+    <p>The publisher publishes the message to the specified topic.</p>
+  </li>
+  <li>
+    <p>After receiving the message, the broker finds the corresponding subscriber based on the topic.</p>
+  </li>
+  <li>
+    <p>The broker pushes the message to all subscribers who have subscribed to the topic.</p>
+  </li>
+</ol>
+
+<h2 id="implementation-details">Implementation details</h2>
+
+<h3 id="1-publisher-implementation">1. Publisher Implementation</h3>
+
+<p>The publisher is a client system that is responsible for creating topics and publishing messages to topics. The publisher can be any application or service that can send messages.</p>
+
+<p>The publisher creates a socket connection with the broker through new Socket. It writes messages to the broker through PrintWriter and reads messages from the broker through BufferedReader.</p>
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code>
+<span class="c1">// Create a Socket connected to the Broker</span>
+        <span class="c1">// Create a Socket connected to the Broker</span>
+        <span class="nc">Socket</span> <span class="n">socket</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">Socket</span><span class="o">(</span><span class="n">brokerIp</span><span class="o">,</span> <span class="n">brokerPort</span><span class="o">);</span>
+        <span class="nc">PrintWriter</span> <span class="n">out</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">PrintWriter</span><span class="o">(</span><span class="n">socket</span><span class="o">.</span><span class="na">getOutputStream</span><span class="o">(),</span> <span class="kc">true</span><span class="o">);</span>
+        <span class="nc">BufferedReader</span> <span class="n">reader</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">BufferedReader</span><span class="o">(</span><span class="k">new</span> <span class="nc">InputStreamReader</span><span class="o">(</span><span class="nc">System</span><span class="o">.</span><span class="na">in</span><span class="o">));</span>
+        <span class="nc">BufferedReader</span> <span class="n">brokerReader</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">BufferedReader</span><span class="o">(</span><span class="k">new</span> <span class="nc">InputStreamReader</span><span class="o">(</span><span class="n">socket</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">()));</span>
+
+
+        <span class="n">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"PUB"</span><span class="o">);</span>
+
+
+        <span class="k">new</span> <span class="nf">Thread</span><span class="o">(()</span> <span class="o">-&gt;</span> <span class="o">{</span>
+            <span class="k">try</span> <span class="o">{</span>
+                <span class="nc">String</span> <span class="n">response</span><span class="o">;</span>
+
+                <span class="k">while</span> <span class="o">((</span><span class="n">response</span> <span class="o">=</span> <span class="n">brokerReader</span><span class="o">.</span><span class="na">readLine</span><span class="o">())</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"[Response from Broker]: "</span> <span class="o">+</span> <span class="n">response</span><span class="o">);</span>
+                    <span class="k">if</span> <span class="o">(</span><span class="n">response</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="s">"close"</span><span class="o">)){</span>
+                        <span class="n">socket</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+                    <span class="o">}</span>
+                <span class="o">}</span>
+                <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"res:"</span><span class="o">+</span><span class="n">brokerReader</span><span class="o">.</span><span class="na">readLine</span><span class="o">());</span>
+            <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="nc">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">if</span> <span class="o">(</span><span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">().</span><span class="na">equals</span><span class="o">(</span><span class="s">"socket closed"</span><span class="o">)){</span>
+
+                    <span class="nc">System</span><span class="o">.</span><span class="na">exit</span><span class="o">(</span><span class="mi">0</span><span class="o">);</span>
+                <span class="o">}</span>
+
+                <span class="c1">//e.printStackTrace();</span>
+            <span class="o">}</span>
+        <span class="o">}).</span><span class="na">start</span><span class="o">();</span>
+
+
+</code></pre></div></div>
+<p>The publisher creates a topic, combines the topic ID, topic name, and publisher username into a string, and sends it to the broker through the socket for processing.</p>
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code> <span class="kd">private</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">createTopic</span><span class="o">(</span><span class="nc">String</span><span class="o">[]</span> <span class="n">parts</span><span class="o">,</span> <span class="nc">PrintWriter</span> <span class="n">out</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">if</span> <span class="o">(</span><span class="n">parts</span><span class="o">.</span><span class="na">length</span> <span class="o">!=</span> <span class="mi">3</span><span class="o">)</span> <span class="o">{</span>
+            <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"[ERROR] Parameter error."</span><span class="o">);</span>
+            <span class="k">return</span><span class="o">;</span>
+        <span class="o">}</span>
+
+        <span class="nc">String</span> <span class="n">topicId</span> <span class="o">=</span> <span class="n">parts</span><span class="o">[</span><span class="mi">1</span><span class="o">];</span>
+        <span class="nc">String</span> <span class="n">topicName</span> <span class="o">=</span> <span class="n">parts</span><span class="o">[</span><span class="mi">2</span><span class="o">];</span>
+        <span class="nc">String</span> <span class="n">message</span> <span class="o">=</span> <span class="s">"CREATE "</span> <span class="o">+</span> <span class="n">topicId</span> <span class="o">+</span> <span class="s">" "</span> <span class="o">+</span> <span class="n">topicName</span> <span class="o">+</span> <span class="s">" "</span> <span class="o">+</span> <span class="n">username</span><span class="o">;</span>
+
+        <span class="n">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">message</span><span class="o">);</span>
+    <span class="o">}</span>
+
+</code></pre></div></div>
+<p>Publisher sends message</p>
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code>
+ <span class="kd">private</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">publishMessage</span><span class="o">(</span><span class="nc">String</span><span class="o">[]</span> <span class="n">parts</span><span class="o">,</span> <span class="nc">PrintWriter</span> <span class="n">out</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">if</span> <span class="o">(</span><span class="n">parts</span><span class="o">.</span><span class="na">length</span> <span class="o">&lt;</span> <span class="mi">3</span><span class="o">)</span> <span class="o">{</span>
+            <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"[ERROR] Parameter error."</span><span class="o">);</span>
+            <span class="k">return</span><span class="o">;</span>
+        <span class="o">}</span>
+
+        <span class="nc">String</span> <span class="n">topicId</span> <span class="o">=</span> <span class="n">parts</span><span class="o">[</span><span class="mi">1</span><span class="o">];</span>
+        <span class="nc">String</span> <span class="n">content</span> <span class="o">=</span> <span class="nc">String</span><span class="o">.</span><span class="na">join</span><span class="o">(</span><span class="s">" "</span><span class="o">,</span> <span class="nc">Arrays</span><span class="o">.</span><span class="na">copyOfRange</span><span class="o">(</span><span class="n">parts</span><span class="o">,</span> <span class="mi">2</span><span class="o">,</span> <span class="n">parts</span><span class="o">.</span><span class="na">length</span><span class="o">));</span>
+
+        <span class="k">if</span><span class="o">(</span><span class="n">content</span><span class="o">.</span><span class="na">length</span><span class="o">()&gt;</span><span class="mi">100</span><span class="o">){</span>
+            <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"[ERROR] No more than 100 characters."</span><span class="o">);</span>
+            <span class="k">return</span><span class="o">;</span>
+        <span class="o">}</span>
+
+        <span class="nc">String</span> <span class="n">message</span> <span class="o">=</span> <span class="s">"PUBLISH "</span> <span class="o">+</span> <span class="n">topicId</span> <span class="o">+</span> <span class="s">" "</span> <span class="o">+</span> <span class="n">content</span><span class="o">+</span> <span class="s">" "</span> <span class="o">+</span><span class="n">username</span><span class="o">;</span>
+
+        <span class="n">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">message</span><span class="o">);</span>
+    <span class="o">}</span>
+
+</code></pre></div></div>
+<h3 id="2subscriber-implementation">2.Subscriber Implementation</h3>
+
+<p>Subscribers are clients that express interest in specific topics by subscribing to them through the broker. They receive real-time messages about these topics from the broker node.</p>
+
+<p>Subscribers also create a socket connection to the broker through new Socket. They write messages to the broker through PrintWriter and read messages from the broker through BufferedReader.</p>
+
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code>
+        <span class="nc">Socket</span> <span class="n">socket</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">Socket</span><span class="o">(</span><span class="n">brokerIp</span><span class="o">,</span> <span class="n">brokerPort</span><span class="o">);</span>
+        <span class="nc">PrintWriter</span> <span class="n">out</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">PrintWriter</span><span class="o">(</span><span class="n">socket</span><span class="o">.</span><span class="na">getOutputStream</span><span class="o">(),</span> <span class="kc">true</span><span class="o">);</span>
+        <span class="nc">BufferedReader</span> <span class="n">reader</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">BufferedReader</span><span class="o">(</span><span class="k">new</span> <span class="nc">InputStreamReader</span><span class="o">(</span><span class="nc">System</span><span class="o">.</span><span class="na">in</span><span class="o">));</span>
+        <span class="nc">BufferedReader</span> <span class="n">brokerReader</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">BufferedReader</span><span class="o">(</span><span class="k">new</span> <span class="nc">InputStreamReader</span><span class="o">(</span><span class="n">socket</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">()));</span>
+
+
+        <span class="n">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"SUB"</span><span class="o">);</span>
+
+
+        <span class="k">new</span> <span class="nf">Thread</span><span class="o">(()</span> <span class="o">-&gt;</span> <span class="o">{</span>
+            <span class="k">try</span> <span class="o">{</span>
+                <span class="nc">String</span> <span class="n">message</span><span class="o">;</span>
+                <span class="k">while</span> <span class="o">((</span><span class="n">message</span> <span class="o">=</span> <span class="n">brokerReader</span><span class="o">.</span><span class="na">readLine</span><span class="o">())</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"[Response from Broker]: "</span> <span class="o">+</span> <span class="n">message</span><span class="o">);</span>
+                    <span class="k">if</span> <span class="o">(</span><span class="n">message</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="s">"close"</span><span class="o">)){</span>
+                        <span class="n">socket</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+                    <span class="o">}</span>
+                <span class="o">}</span>
+            <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="nc">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">if</span> <span class="o">(</span><span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">().</span><span class="na">equals</span><span class="o">(</span><span class="s">"socket closed"</span><span class="o">)){</span>
+
+                    <span class="nc">System</span><span class="o">.</span><span class="na">exit</span><span class="o">(</span><span class="mi">0</span><span class="o">);</span>
+                <span class="o">}</span>
+            <span class="o">}</span>
+        <span class="o">}).</span><span class="na">start</span><span class="o">();</span>
+
+
+</code></pre></div></div>
+<p>When a subscriber subscribes to a topic, the topic ID and the subscriber’s username are combined into a message and sent to the broker.</p>
+
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code> <span class="kd">private</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">subscribe</span><span class="o">(</span><span class="nc">String</span><span class="o">[]</span> <span class="n">parts</span><span class="o">,</span> <span class="nc">PrintWriter</span> <span class="n">out</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">if</span> <span class="o">(</span><span class="n">parts</span><span class="o">.</span><span class="na">length</span> <span class="o">!=</span> <span class="mi">2</span><span class="o">)</span> <span class="o">{</span>
+            <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"[ERROR] Parameter error."</span><span class="o">);</span>
+            <span class="k">return</span><span class="o">;</span>
+        <span class="o">}</span>
+
+        <span class="nc">String</span> <span class="n">topicId</span> <span class="o">=</span> <span class="n">parts</span><span class="o">[</span><span class="mi">1</span><span class="o">];</span>
+
+        <span class="nc">String</span> <span class="n">message</span> <span class="o">=</span> <span class="s">"SUBSCRIBE "</span> <span class="o">+</span> <span class="n">topicId</span> <span class="o">+</span> <span class="s">" "</span> <span class="o">+</span> <span class="n">username</span><span class="o">;</span>
+
+
+        <span class="n">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">message</span><span class="o">);</span>
+    <span class="o">}</span>
+
+</code></pre></div></div>
+
+<h3 id="3broker-implementation">3.Broker Implementation</h3>
+
+<p>The broker is the core of the distributed message subscription system, responsible for managing topics, subscriptions, and message distribution. The broker nodes are connected to each other to form a network, managing topic creation, topic lists, subscriber lists, and message routing, ensuring that messages can be effectively delivered between different topics and subscribers.</p>
+
+<p>Under a single node, the broker only needs to receive messages from subscribers or publishers and process them accordingly, without considering the message synchronization issues between multiple nodes.</p>
+
+<p>Get the socket from the publisher or subscriber through serverSocket.accept().</p>
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code>
+       <span class="nc">ServerSocket</span> <span class="n">serverSocket</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">ServerSocket</span><span class="o">(</span><span class="n">port</span><span class="o">);</span>
+        <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Broker started on port: "</span> <span class="o">+</span> <span class="n">port</span><span class="o">);</span>
+
+
+
+        <span class="k">while</span> <span class="o">(</span><span class="kc">true</span><span class="o">)</span> <span class="o">{</span>
+            <span class="nc">Socket</span> <span class="n">socket</span> <span class="o">=</span> <span class="n">serverSocket</span><span class="o">.</span><span class="na">accept</span><span class="o">();</span>
+            <span class="k">new</span> <span class="nf">Thread</span><span class="o">(()</span> <span class="o">-&gt;</span> <span class="o">{</span>
+                <span class="k">try</span> <span class="o">{</span>
+                    <span class="nc">BufferedReader</span> <span class="n">in</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">BufferedReader</span><span class="o">(</span><span class="k">new</span> <span class="nc">InputStreamReader</span><span class="o">(</span><span class="n">socket</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">()));</span>
+                    <span class="nc">PrintWriter</span> <span class="n">out</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">PrintWriter</span><span class="o">(</span><span class="n">socket</span><span class="o">.</span><span class="na">getOutputStream</span><span class="o">(),</span> <span class="kc">true</span><span class="o">);</span>
+
+
+                    <span class="nc">String</span> <span class="n">type</span> <span class="o">=</span> <span class="n">in</span><span class="o">.</span><span class="na">readLine</span><span class="o">();</span>
+                    <span class="k">if</span> <span class="o">(</span><span class="s">"SUB"</span><span class="o">.</span><span class="na">equalsIgnoreCase</span><span class="o">(</span><span class="n">type</span><span class="o">)</span> <span class="o">||</span> <span class="s">"PUB"</span><span class="o">.</span><span class="na">equalsIgnoreCase</span><span class="o">(</span><span class="n">type</span><span class="o">))</span> <span class="o">{</span>
+
+<span class="c1">//                        clientConnections.add(socket);</span>
+                        <span class="k">new</span> <span class="nf">Thread</span><span class="o">(</span><span class="k">new</span> <span class="nc">ClientHandler</span><span class="o">(</span><span class="n">socket</span><span class="o">)).</span><span class="na">start</span><span class="o">();</span>
+                        <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Accepted connection from a client."</span><span class="o">);</span>
+
+
+                        <span class="k">if</span> <span class="o">(</span><span class="s">"SUB"</span><span class="o">.</span><span class="na">equalsIgnoreCase</span><span class="o">(</span><span class="n">type</span><span class="o">))</span> <span class="o">{</span>
+                            <span class="n">subscriberCount</span><span class="o">++;</span>
+                            <span class="k">if</span> <span class="o">(</span><span class="n">subscriberCount</span> <span class="o">&gt;</span> <span class="no">MAX_SUB</span><span class="o">)</span> <span class="o">{</span>
+                                <span class="c1">//socket.close();</span>
+                                <span class="n">sendResponse</span><span class="o">(</span><span class="n">socket</span><span class="o">,</span> <span class="s">"close"</span><span class="o">);</span>
+                                <span class="n">subscriberCount</span><span class="o">--;</span>
+                            <span class="o">}</span>
+
+                        <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+                            <span class="n">publisherCount</span><span class="o">++;</span>
+                            <span class="k">if</span> <span class="o">(</span><span class="n">publisherCount</span> <span class="o">&gt;</span> <span class="no">MAX_PUB</span><span class="o">)</span> <span class="o">{</span>
+                                <span class="c1">//socket.close();</span>
+                                <span class="n">sendResponse</span><span class="o">(</span><span class="n">socket</span><span class="o">,</span> <span class="s">"close"</span><span class="o">);</span>
+                                <span class="n">publisherCount</span><span class="o">--;</span>
+                            <span class="o">}</span>
+
+                        <span class="o">}</span>
+
+                    <span class="o">}</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="nc">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="c1">//e.printStackTrace();</span>
+                    <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">());</span>
+                <span class="o">}</span>
+            <span class="o">}).</span><span class="na">start</span><span class="o">();</span>
+        <span class="o">}</span>
+</code></pre></div></div>
+<p>Create a ClientHandler that implements the Runnable interface to process various messages from publishers or subscribers in the child thread</p>
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code>
+<span class="kd">private</span> <span class="kd">static</span> <span class="kd">class</span> <span class="nc">ClientHandler</span> <span class="kd">implements</span> <span class="nc">Runnable</span> <span class="o">{</span>
+        <span class="kd">private</span> <span class="kd">final</span> <span class="nc">Socket</span> <span class="n">clientSocket</span><span class="o">;</span>
+
+        <span class="kd">public</span> <span class="nf">ClientHandler</span><span class="o">(</span><span class="nc">Socket</span> <span class="n">socket</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">this</span><span class="o">.</span><span class="na">clientSocket</span> <span class="o">=</span> <span class="n">socket</span><span class="o">;</span>
+        <span class="o">}</span>
+
+        <span class="nd">@Override</span>
+        <span class="kd">public</span> <span class="kt">void</span> <span class="nf">run</span><span class="o">()</span> <span class="o">{</span>
+            <span class="k">try</span> <span class="o">(</span><span class="nc">BufferedReader</span> <span class="n">in</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">BufferedReader</span><span class="o">(</span><span class="k">new</span> <span class="nc">InputStreamReader</span><span class="o">(</span><span class="n">clientSocket</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">()));</span>
+                 <span class="nc">PrintWriter</span> <span class="n">out</span> <span class="o">=</span> <span class="k">new</span> <span class="nc">PrintWriter</span><span class="o">(</span><span class="n">clientSocket</span><span class="o">.</span><span class="na">getOutputStream</span><span class="o">(),</span> <span class="kc">true</span><span class="o">))</span> <span class="o">{</span>
+
+                <span class="nc">String</span> <span class="n">message</span><span class="o">;</span>
+                <span class="k">while</span> <span class="o">((</span><span class="n">message</span> <span class="o">=</span> <span class="n">in</span><span class="o">.</span><span class="na">readLine</span><span class="o">())</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="n">handleClientMessage</span><span class="o">(</span><span class="n">message</span><span class="o">,</span> <span class="n">clientSocket</span><span class="o">);</span>
+                <span class="o">}</span>
+            <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="nc">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                <span class="c1">//e.printStackTrace();</span>
+                <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">());</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+
+
+        <span class="kd">private</span> <span class="kt">void</span> <span class="nf">handleClientMessage</span><span class="o">(</span><span class="nc">String</span> <span class="n">message</span><span class="o">,</span> <span class="nc">Socket</span> <span class="n">socket</span><span class="o">)</span> <span class="o">{</span>
+            <span class="nc">String</span><span class="o">[]</span> <span class="n">parts</span> <span class="o">=</span> <span class="n">message</span><span class="o">.</span><span class="na">split</span><span class="o">(</span><span class="s">" "</span><span class="o">);</span>
+            <span class="nc">String</span> <span class="n">command</span> <span class="o">=</span> <span class="n">parts</span><span class="o">[</span><span class="mi">0</span><span class="o">];</span>
+
+            <span class="k">switch</span> <span class="o">(</span><span class="n">command</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">case</span> <span class="s">"CREATE"</span><span class="o">:</span>
+                    <span class="n">createTopic</span><span class="o">(</span><span class="n">parts</span><span class="o">,</span> <span class="n">socket</span><span class="o">);</span>
+                    
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="k">case</span> <span class="s">"PUBLISH"</span><span class="o">:</span>
+                    <span class="n">publishMessage</span><span class="o">(</span><span class="n">parts</span><span class="o">,</span> <span class="n">socket</span><span class="o">);</span>
+                    
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="k">case</span> <span class="s">"SHOW"</span><span class="o">:</span>
+                    <span class="n">showSubscribers</span><span class="o">(</span><span class="n">parts</span><span class="o">,</span> <span class="n">socket</span><span class="o">);</span>
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="k">case</span> <span class="s">"DELETE"</span><span class="o">:</span>
+                    <span class="n">deleteTopic</span><span class="o">(</span><span class="n">parts</span><span class="o">,</span> <span class="n">socket</span><span class="o">);</span>
+                    
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="k">case</span> <span class="s">"SUBSCRIBE"</span><span class="o">:</span>
+                    <span class="n">subscribe</span><span class="o">(</span><span class="n">parts</span><span class="o">,</span> <span class="n">socket</span><span class="o">);</span>
+                    
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="k">case</span> <span class="s">"DISPLAY"</span><span class="o">:</span>
+                    <span class="n">displayTopics</span><span class="o">(</span><span class="n">socket</span><span class="o">);</span>
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="k">case</span> <span class="s">"CURRENT"</span><span class="o">:</span>
+                    <span class="n">showCurrentSubscriptions</span><span class="o">(</span><span class="n">parts</span><span class="o">,</span><span class="n">socket</span><span class="o">);</span>
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="k">case</span> <span class="s">"UNSUBSCRIBE"</span><span class="o">:</span>
+                    <span class="n">unsubscribe</span><span class="o">(</span><span class="n">parts</span><span class="o">,</span> <span class="n">socket</span><span class="o">);</span>
+                    
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="k">default</span><span class="o">:</span>
+                    <span class="nc">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"[ERROR] Illegal client instruction."</span><span class="o">);</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+
+        <span class="o">......</span>
+
+
+    <span class="o">}</span>
+
+</code></pre></div></div>
+
+<h2 id="test">Test</h2>
+
+<p>Start the broker, subscriber, and publisher in sequence. First, the publisher creates a topic, the subscriber subscribes to the topic, and then the publisher publishes a message, and the subscriber successfully receives the message. In this way, the publisher-subscriber function under a single node has been implemented. We will implement a publish-subscribe system under multiple nodes in the next article.
+<img src="/assets/images/ss1.jpg" alt="Figure1" />
+<img src="/assets/images/ss2.jpg" alt="Figure2" /></p>]]></content><author><name>desong</name></author><summary type="html"><![CDATA[System Architecture Overview]]></summary></entry></feed>
