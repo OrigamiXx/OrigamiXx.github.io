@@ -18,14 +18,12 @@
 # You can create any custom variable you would like, and they will be accessible
 # in the templates via {{ site.myvariable }}.
 
-title: desong的博客
-email: lnpjjds@163.com
+title: JY_Whale's Blog
+email: jingyu.yao77@gmail.com
 description: >- # this means to ignore newlines until "baseurl:"
-  Write an awesome description for your new site here. You can edit this
-  line in _config.yml. It will appear in your document head meta (for
-  Google search results) and in your feed.xml site description.
+  This is JY_Whale's Blog. Hello!
 baseurl: "" # the subpath of your site, e.g. /blog
-url: "https://moo611.github.io" # the base hostname & protocol for your site, e.g. http://example.com
+url: "https://origamixx.github.io" # the base hostname & protocol for your site, e.g. http://example.com
 twitter_username: jekyllrb
 github_username:  jekyll
 
@@ -58,10 +56,10 @@ plugins:
 minimal_mistakes_skin : "default"
 
 author:
-  name     : "desong"
-  avatar   : "/assets/images/logo.png"
-  bio      : "My awesome biography constrained to a sentence or two goes here."
-  # location : "Somewhere, USA"
+  name     : "JY_Whale"
+  avatar   : "/assets/images/avatar.png"
+  bio      : "I love music and gaming, while also enjoying endless idle."
+  location : "Boston, USA"
 
 defaults:
   # _posts
